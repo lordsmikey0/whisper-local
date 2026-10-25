@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whisper — аудио в текст</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <a class="brand" href="/" aria-label="Whisper, главная"><span class="mark" aria-hidden="true">ııı</span> whisper<span class="brand-note">local</span></a>
+      <span class="local-badge"><i></i> На вашем компьютере</span>
+    </header>
+    <section class="intro">
+      <p class="eyebrow">ИЗ ЗАПИСИ — В СЛОВА</p>
+      <h1>Аудио в текст.<br><span>Без лишних действий.</span></h1>
+      <p>Добавьте записи в очередь — остальное обработается по порядку.<br class="desktop"> Стенограммы и MP3 остаются на вашем компьютере.</p>
+    </section>
+    <form id="form" class="card">
+      <fieldset id="controls">
+        <div class="mode-switch" role="group" aria-label="Что сделать с файлом">
+          <label><input type="radio" name="mode" value="transcribe" checked><span>Распознать речь</span></label>
+          <label><input type="radio" name="mode" value="convert"><span>MP4 → MP3</span></label>
+        </div>
+        <label class="drop-zone" id="drop-zone">
+          <input id="file" type="file" name="file" accept="audio/*,video/mp4,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac,.wma,.mp4,.webm" multiple>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg>
+          <strong id="file-title">Перетащите аудио или MP4 сюда</strong>
+          <span id="file-info">Можно сразу несколько · MP4, MP3, WAV, M4A, FLAC и другие</span>
+        </label>
+        <ul id="selected-files" class="selected-files" aria-label="Выбранные файлы" hidden></ul>
+        <p id="convert-hint" class="muted convert-hint" hidden>Первая аудиодорожка → MP3 · 192 кбит/с. Модель Whisper не требуется.</p>
+        <div class="settings" id="settings">
+          <label>Язык записи<select name="language"><option value="auto">Определить автоматически</option><option value="ru">Русский</option><option value="en">Английский</option></select></label>
+          <label>Модель<select name="model"><option value="small">Small · рекомендуется</option><option value="base">Base · быстрее</option><option value="tiny">Tiny · самая лёгкая</option><option value="medium">Medium · больше памяти</option></select></label>
+          <label>Устройство<select name="device"><option value="auto">Автоматически</option><option value="cuda">Видеокарта NVIDIA</option><option value="cpu">Процессор</option></select></label>
+        </div>
+        <div class="actions">
+          <label class="check" id="offline-option"><input type="checkbox" name="offline" checked> Без интернета <span title="Использовать только уже скачанную модель. Small уже установлена.">ⓘ</span></label>
+          <button type="submit" id="submit" disabled>Добавить в очередь ↗</button>
+        </div>
+      </fieldset>
+      <div id="status" class="status" role="status" aria-live="polite" hidden><span id="status-text"></span></div>
+    </form>
+    <section class="card queue-card" aria-labelledby="queue-title">
+      <div class="queue-head"><div><p class="eyebrow">ПО ОДНОМУ, БЕЗ СПЕШКИ</p><h2 id="queue-title">Очередь файлов <span id="queue-count" class="count">0</span></h2><p id="queue-summary" class="muted">Пока здесь пусто. Добавьте первую запись.</p></div>
+        <div class="queue-actions"><a id="archive" href="/api/jobs/archive" class="button secondary" download hidden>Скачать всё .zip ↓</a><button id="cancel-all" class="quiet-button" type="button" disabled>Отменить всё</button></div>
+      </div>
+      <p id="connection" class="connection" role="status" hidden>Нет связи с сервером. Пробую подключиться снова…</p>
+      <div id="queue-list" class="queue-list" aria-label="Задачи"></div>
+      <p class="queue-note">Можно добавить ещё файлы во время обработки. Очередь сохранится при обновлении вкладки, пока работает сервер.</p>
+    </section>
+    <section class="card history-card" aria-labelledby="history-title">
+      <div class="queue-head"><div><p class="eyebrow">СОХРАНЕНО ЛОКАЛЬНО</p><h2 id="history-title">История результатов <span id="history-count" class="count">0</span></h2><p id="history-summary" class="muted">Готовые TXT и MP3 сохраняются здесь после перезапуска.</p></div></div>
+      <div class="history-filters">
+        <input id="history-search" type="search" placeholder="Найти по имени файла" aria-label="Поиск в истории">
+        <select id="history-type" aria-label="Тип результата"><option value="all">Все результаты</option><option value="transcribe">Стенограммы TXT</option><option value="convert">Аудиодорожки MP3</option></select>
+      </div>
+      <p id="history-status" class="connection" role="status" hidden></p>
+      <div id="history-list" class="queue-list" aria-label="Сохранённые результаты"></div>
+      <p id="history-empty" class="queue-note">История пока пуста. Добавьте файлы в очередь — готовые результаты сохранятся автоматически.</p>
+      <p class="queue-note">Исходные записи в истории не хранятся. Результаты останутся до тех пор, пока вы их не удалите.</p>
+    </section>
+    <section id="result" class="card result" hidden>
+      <div class="result-head"><div><p class="eyebrow">ГОТОВО</p><h2 id="result-title">Ваша стенограмма</h2><p id="result-info" class="muted"></p></div><div class="queue-actions"><a id="download" class="button" download>Скачать .txt ↓</a><button id="close-result" class="quiet-button" type="button">Закрыть</button></div></div>
+      <textarea id="transcript" aria-label="Текст стенограммы" readonly spellcheck="false"></textarea>
+      <audio id="audio-preview" controls preload="metadata" hidden aria-label="Извлечённая аудиодорожка"></audio>
+    </section>
+    <footer><span>Ваши записи остаются на этом компьютере.</span><span>Whisper / FastAPI</span></footer>
+  </main>
+</body>
+</html>
