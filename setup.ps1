@@ -1,24 +1,50 @@
+param([switch]$CheckOnly)
+
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $env:PYTHONUTF8 = '1'
 
-# Use a regular Python installation, or the bundled runtime on this computer.
-$candidates = @()
-if (Get-Command py -ErrorAction SilentlyContinue) {
+function Find-CompatiblePython {
+    param([string]$Executable, [string[]]$LauncherArguments = @())
+    $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $detected = & py -3 -c 'import sys; print(sys.executable)' 2>$null
-    if ($LASTEXITCODE -eq 0) { $candidates += $detected }
-    $ErrorActionPreference = 'Stop'
+    try {
+        $detected = & $Executable @LauncherArguments -c 'import sys; assert (3,10) <= sys.version_info[:2] <= (3,13) and sys.maxsize > 2**32; print(sys.executable)' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $detected) {
+            return [string]($detected | Select-Object -Last 1)
+        }
+    } catch {
+        # Ignore missing interpreters and Windows Store aliases.
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return $null
 }
-$bundled = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-$candidates += $bundled
-$python = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+
+# Ask for supported versions explicitly: py -3 may select Python 3.14+.
+$python = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    foreach ($version in @('3.12', '3.11', '3.10', '3.13')) {
+        $python = Find-CompatiblePython -Executable 'py' -LauncherArguments @('-' + $version)
+        if ($python) { break }
+    }
+}
 if (-not $python) {
-    Write-Host 'Install Python 3.12 (64-bit) from https://www.python.org/downloads/windows/ and run setup.cmd again.'
+    $bundled = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    if (Test-Path -LiteralPath $bundled) {
+        $python = Find-CompatiblePython -Executable $bundled
+    }
+}
+if (-not $python -and (Get-Command python -ErrorAction SilentlyContinue)) {
+    $python = Find-CompatiblePython -Executable 'python'
+}
+if (-not $python) {
+    Write-Host 'No compatible 64-bit Python found. Install Python 3.12 x64 from https://www.python.org/downloads/windows/ and run setup.cmd again.'
     exit 1
 }
-& $python -c 'import sys; assert (3,10) <= sys.version_info[:2] <= (3,13)'
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host ('Using Python: ' + $python)
+& $python --version
+if ($CheckOnly) { exit 0 }
 if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
     & $python -m venv --without-pip .venv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
