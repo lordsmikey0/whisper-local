@@ -1,4 +1,6 @@
 .venv/
+.diarization-venv/
+.speaker-wheels/
 models/
 __pycache__/
 *.partial
@@ -19,7 +21,12 @@ history/
 *.opus
 *.wma
 *.webm
+*.mkv
+*.mov
+*.avi
+*.m4v
 *.zip
 *.txt
 !requirements.txt
 !requirements-dev.txt
+!requirements-speakers.txt

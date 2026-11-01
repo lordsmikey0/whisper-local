@@ -2,6 +2,7 @@ faster-whisper==1.2.1
 ctranslate2==4.6.0
 setuptools==80.9.0
 av==15.1.0
+imageio-ffmpeg==0.6.0
 fastapi==0.115.12
 uvicorn==0.34.3
 python-multipart==0.0.20

@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Annotated, Literal
 from uuid import UUID
+from pydantic import BaseModel, Field
 
 import av
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -20,6 +21,8 @@ from starlette.concurrency import run_in_threadpool
 from convert import mp4_to_mp3
 from jobqueue import TaskQueue
 from history import HistoryStore
+from media_formats import FORMATS, result_mime
+from diarization import ModelPreparation
 
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / ".web-tmp"
@@ -30,11 +33,14 @@ HISTORY_ROOT = ROOT / "history"
 async def lifespan(app):
     history = HistoryStore(HISTORY_ROOT)
     app.state.history = history
+    preparation = ModelPreparation(ROOT)
+    app.state.speaker_preparation = preparation
     manager = TaskQueue(ROOT / ".web-jobs", BUSY, history=history)
     app.state.jobs = manager
     try:
         yield
     finally:
+        await run_in_threadpool(preparation.close)
         await run_in_threadpool(manager.close)
 
 
@@ -64,6 +70,33 @@ def health():
     return {"status": "ok", "busy": BUSY.locked()}
 
 
+@app.get("/api/formats")
+def formats():
+    return {"formats": [{"id": key, **value} for key, value in FORMATS.items()]}
+
+
+class ModelAccess(BaseModel):
+    token: str = Field(min_length=1, max_length=1000, repr=False)
+
+
+class SpeakerNames(BaseModel):
+    names: dict[str, str] = Field(default_factory=dict)
+
+
+@app.get('/api/diarization/status')
+def speaker_status(request: Request):
+    return request.app.state.speaker_preparation.status()
+
+
+@app.post('/api/diarization/prepare', status_code=202)
+def prepare_speaker_model(request: Request, access: ModelAccess):
+    try:
+        request.app.state.speaker_preparation.start(access.token)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return request.app.state.speaker_preparation.status()
+
+
 def manager_for(request):
     return request.app.state.jobs
 
@@ -89,11 +122,24 @@ def enqueue_job(
     device: Annotated[Literal["auto", "cpu", "cuda"], Form()] = "auto",
     offline: Annotated[bool, Form()] = True,
     client_id: Annotated[UUID | None, Form()] = None,
+    output_format: Annotated[Literal["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "mp4", "mkv", "mov", "webm"], Form()] = "mp3",
+    quality: Annotated[Literal["compact", "balanced", "high"], Form()] = "balanced",
+    resolution: Annotated[Literal["source", "1080", "720", "480"], Form()] = "source",
+    fps: Annotated[Literal["source", "24", "25", "30", "60"], Form()] = "source",
+    trim_start: Annotated[float, Form()] = 0,
+    trim_end: Annotated[float | None, Form()] = None,
+    mute: Annotated[bool, Form()] = False,
+    diarize: Annotated[bool, Form()] = False,
+    keep_audio: Annotated[bool, Form()] = False,
+    num_speakers: Annotated[int | None, Form()] = None,
 ):
     try:
         return manager_for(request).enqueue(upload_name(file), mode, file.file,
                                             identity=client_id.hex if client_id else None,
-                                            model=model, language=language, device=device, offline=offline)
+                                            model=model, language=language, device=device, offline=offline,
+                                            output_format=output_format, quality=quality, resolution=resolution,
+                                            fps=fps, trim_start=trim_start, trim_end=trim_end, mute=mute,
+                                            diarize=diarize, num_speakers=num_speakers, keep_audio=keep_audio)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     finally:
@@ -127,7 +173,7 @@ def download_job(request: Request, identity: str):
     if job.state != "done":
         raise HTTPException(409, "Результат ещё не готов.")
     return FileResponse(job.output, filename=job.output_name,
-                        media_type="audio/mpeg" if job.mode == "convert" else "text/plain; charset=utf-8")
+                        media_type=result_mime(job.output.suffix))
 
 
 @app.get("/api/jobs/{identity}/result")
@@ -135,7 +181,7 @@ def job_text(request: Request, identity: str):
     job = find_job(request, identity)
     if job.state != "done" or job.mode != "transcribe":
         raise HTTPException(409, "Стенограмма ещё не готова.")
-    return {"text": job.output.read_text(encoding="utf-8-sig")}
+    return request.app.state.history.transcript(identity)
 
 
 def history_record(request, identity):
@@ -148,7 +194,7 @@ def history_record(request, identity):
 @app.get("/api/history")
 def list_history(request: Request):
     items = request.app.state.history.list()
-    return {"items": items, "count": len(items), "bytes": sum(item["size"] for item in items)}
+    return {"items": items, "count": len(items), "bytes": sum(item["size"] + item['audio_size'] for item in items)}
 
 
 @app.get("/api/history/{identity}/download")
@@ -157,7 +203,7 @@ def download_history(request: Request, identity: UUID):
     if not record["available"]:
         raise HTTPException(404, "Файл результата не найден на диске.")
     return FileResponse(request.app.state.history.path(record), filename=record["output_name"],
-                        media_type="audio/mpeg" if record["mode"] == "convert" else "text/plain; charset=utf-8")
+                        media_type=result_mime(request.app.state.history.path(record).suffix))
 
 
 @app.get("/api/history/{identity}/result")
@@ -167,7 +213,30 @@ def history_text(request: Request, identity: UUID):
         raise HTTPException(409, "Этот результат — аудиофайл, а не стенограмма.")
     if not record["available"]:
         raise HTTPException(404, "Файл результата не найден на диске.")
-    return {"text": request.app.state.history.path(record).read_text(encoding="utf-8-sig")}
+    return request.app.state.history.transcript(identity.hex)
+
+
+@app.get('/api/history/{identity}/audio')
+def transcript_audio(request: Request, identity: UUID):
+    record = history_record(request, identity.hex)
+    path = request.app.state.history.audio_path(identity.hex)
+    if record['mode'] != 'transcribe' or not path.is_file():
+        raise HTTPException(404, 'Аудио для этой стенограммы не сохранено.')
+    return FileResponse(path, media_type='audio/mpeg', headers={'Cache-Control': 'no-cache'})
+
+
+@app.put('/api/history/{identity}/speakers')
+def update_speaker_names(request: Request, identity: UUID, body: SpeakerNames):
+    record = history_record(request, identity.hex)
+    if record['mode'] != 'transcribe':
+        raise HTTPException(400, 'Имена можно задать только для стенограммы.')
+    with manager_for(request).lock:
+        try:
+            return request.app.state.history.rename_speakers(identity.hex, body.names)
+        except (ValueError, FileNotFoundError) as error:
+            raise HTTPException(400, str(error)) from error
+        except PermissionError:
+            raise HTTPException(409, 'Файл сейчас скачивается. Повторите сохранение имён.') from None
 
 
 @app.delete("/api/history/{identity}")

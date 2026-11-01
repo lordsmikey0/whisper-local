@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 import zipfile
+from media_formats import normalize_options, result_format
 
 ROOT = Path(__file__).resolve().parent
 TERMINAL = {"done", "error", "cancelled"}
@@ -62,8 +63,15 @@ class TaskQueue:
 
     def enqueue(self, filename, mode, stream, identity=None, **options):
         filename = Path(filename.replace("\\", "/")).name or "audio"
-        if mode == "convert" and Path(filename).suffix.lower() != ".mp4":
-            raise ValueError("Для конвертации выберите MP4.")
+        if mode == "convert":
+            options = normalize_options(options)
+        if options.get('diarize'):
+            if mode != 'transcribe':
+                raise ValueError('Разделение по говорящим доступно только для распознавания речи.')
+            from diarization import require_ready
+            require_ready()
+        if options.get('num_speakers') is not None and not 1 <= options['num_speakers'] <= 20:
+            raise ValueError('Количество говорящих должно быть от 1 до 20.')
         suffix = Path(filename).suffix
         if len(suffix) > 20:
             suffix = ".audio"
@@ -77,7 +85,7 @@ class TaskQueue:
             folder.mkdir()
             self.uploading.add(identity)
         source = folder / ("source" + suffix)
-        output = folder / ("result.mp3" if mode == "convert" else "result.txt")
+        output = folder / ("result." + result_format(mode, options))
         try:
             with source.open("wb") as target:
                 shutil.copyfileobj(stream, target, length=1024 * 1024)
@@ -112,7 +120,7 @@ class TaskQueue:
                 "stage": job.stage, "progress": job.progress, "processed": job.processed,
                 "total": job.total, "device": job.device, "error": job.error,
                 "elapsed": round(time.monotonic() - job.started, 1) if job.started and job.state not in TERMINAL else job.elapsed,
-                "output_name": job.output_name}
+                "output_name": job.output_name, "output_format": result_format(job.mode, job.options)}
 
     def snapshots(self):
         with self.lock:
@@ -148,6 +156,18 @@ class TaskQueue:
             command.extend(["--" + option, job.options.get(option, {"model": "small", "language": "auto", "device": "auto"}[option])])
         if job.options.get("offline", True):
             command.append("--offline")
+        if job.mode == 'transcribe' and job.options.get('keep_audio'):
+            command.append('--keep-audio')
+        if job.options.get('diarize'):
+            command.append('--diarize')
+            if job.options.get('num_speakers'):
+                command.extend(['--num-speakers', str(job.options['num_speakers'])])
+        if job.mode == "convert":
+            for option in ("output_format", "quality", "resolution", "fps", "trim_start", "trim_end"):
+                if job.options.get(option) is not None:
+                    command.extend(["--" + option.replace("_", "-"), str(job.options[option])])
+            if job.options.get("mute"):
+                command.append("--mute")
         return command
 
     @staticmethod

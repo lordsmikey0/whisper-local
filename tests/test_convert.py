@@ -10,17 +10,17 @@ import numpy as np
 import web
 
 
-def make_mp4(path, with_audio=True):
+def make_mp4(path, with_audio=True, width=64, height=64):
     """One second of actual MP4 video, optionally with 48 kHz mono AAC."""
     with av.open(str(path), 'w') as target:
         video = target.add_stream('mpeg4', rate=10)
-        video.width = video.height = 64
+        video.width, video.height = width, height
         video.pix_fmt = 'yuv420p'
         if with_audio:
             audio = target.add_stream('aac', rate=48000)
             audio.layout = 'mono'
         for index in range(10):
-            frame = av.VideoFrame.from_ndarray(np.zeros((64, 64, 3), dtype=np.uint8), format='rgb24')
+            frame = av.VideoFrame.from_ndarray(np.zeros((height, width, 3), dtype=np.uint8), format='rgb24')
             frame.pts = index
             for packet in video.encode(frame):
                 target.mux(packet)

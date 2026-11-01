@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Whisper — аудио в текст</title>
+  <title>Media Local — конвертер и распознавание речи</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
@@ -14,28 +14,52 @@
       <span class="local-badge"><i></i> На вашем компьютере</span>
     </header>
     <section class="intro">
-      <p class="eyebrow">ИЗ ЗАПИСИ — В СЛОВА</p>
-      <h1>Аудио в текст.<br><span>Без лишних действий.</span></h1>
-      <p>Добавьте записи в очередь — остальное обработается по порядку.<br class="desktop"> Стенограммы и MP3 остаются на вашем компьютере.</p>
+      <p class="eyebrow">АУДИО · ВИДЕО · ТЕКСТ</p>
+      <h1>Ваши файлы.<br><span>В нужном формате.</span></h1>
+      <p>Конвертируйте записи или распознайте речь — всё в одной очереди.<br class="desktop"> Файлы обрабатываются только на вашем компьютере.</p>
     </section>
-    <form id="form" class="card">
+    <form id="form" class="card" novalidate>
       <fieldset id="controls">
         <div class="mode-switch" role="group" aria-label="Что сделать с файлом">
           <label><input type="radio" name="mode" value="transcribe" checked><span>Распознать речь</span></label>
-          <label><input type="radio" name="mode" value="convert"><span>MP4 → MP3</span></label>
+          <label><input type="radio" name="mode" value="convert"><span>Конвертировать</span></label>
         </div>
         <label class="drop-zone" id="drop-zone">
-          <input id="file" type="file" name="file" accept="audio/*,video/mp4,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac,.wma,.mp4,.webm" multiple>
+          <input id="file" type="file" name="file" accept="audio/*,video/*,.mkv,.mov,.avi,.m4v,.webm,.opus,.flac" multiple>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg>
-          <strong id="file-title">Перетащите аудио или MP4 сюда</strong>
-          <span id="file-info">Можно сразу несколько · MP4, MP3, WAV, M4A, FLAC и другие</span>
+          <strong id="file-title">Перетащите аудио или видео сюда</strong>
+          <span id="file-info">Можно сразу несколько · MP3, MP4, MKV, MOV, WAV, FLAC и другие</span>
         </label>
         <ul id="selected-files" class="selected-files" aria-label="Выбранные файлы" hidden></ul>
-        <p id="convert-hint" class="muted convert-hint" hidden>Первая аудиодорожка → MP3 · 192 кбит/с. Модель Whisper не требуется.</p>
+        <div id="convert-settings" hidden>
+          <div class="conversion-fields">
+            <label>Выходной формат<select name="output_format" id="output-format"><optgroup label="Аудио"><option value="mp3">MP3</option><option value="m4a">M4A / AAC</option><option value="wav">WAV · без потерь</option><option value="flac">FLAC · без потерь</option><option value="aac">AAC</option><option value="ogg">OGG / Vorbis</option><option value="opus">Opus</option></optgroup><optgroup label="Видео"><option value="mp4">MP4 · H.264</option><option value="mkv">MKV · H.264</option><option value="mov">MOV · H.264</option><option value="webm">WebM · VP9</option></optgroup></select></label>
+            <label id="quality-option">Качество<select name="quality"><option value="balanced">Баланс качества и размера</option><option value="compact">Меньше размер</option><option value="high">Выше качество</option></select></label>
+          </div>
+          <p id="convert-hint" class="muted convert-hint">Аудио из записи или видео. Модель Whisper не нужна.</p>
+          <details class="advanced-settings"><summary>Дополнительные настройки</summary>
+            <div class="conversion-fields"><label>Начало, сек.<input name="trim_start" type="number" min="0" step="0.01" value="0"></label><label>Конец, сек.<input name="trim_end" type="number" min="0" step="0.01" placeholder="До конца записи"></label></div>
+            <div id="video-options" hidden><div class="conversion-fields"><label>Разрешение<select name="resolution"><option value="source">Как в исходнике</option><option value="1080">Не выше 1080p</option><option value="720">Не выше 720p</option><option value="480">Не выше 480p</option></select></label><label>Частота кадров<select name="fps"><option value="source">Как в исходнике</option><option value="24">24 кадра/с</option><option value="25">25 кадров/с</option><option value="30">30 кадров/с</option><option value="60">60 кадров/с</option></select></label></div><label class="check mute-option"><input name="mute" type="checkbox"> Удалить звук из видео</label></div>
+          </details>
+        </div>
         <div class="settings" id="settings">
           <label>Язык записи<select name="language"><option value="auto">Определить автоматически</option><option value="ru">Русский</option><option value="en">Английский</option></select></label>
           <label>Модель<select name="model"><option value="small">Small · рекомендуется</option><option value="base">Base · быстрее</option><option value="tiny">Tiny · самая лёгкая</option><option value="medium">Medium · больше памяти</option></select></label>
           <label>Устройство<select name="device"><option value="auto">Автоматически</option><option value="cuda">Видеокарта NVIDIA</option><option value="cpu">Процессор</option></select></label>
+        </div>
+        <div id="listening-option" class="speaker-settings">
+          <label class="check"><input type="checkbox" name="keep_audio"> Сохранить аудио для прослушивания реплик</label>
+          <p class="muted">В истории останется компактная MP3-копия звука. Нажмите на реплику в готовой стенограмме, чтобы её услышать.</p>
+        </div>
+        <div id="speaker-settings" class="speaker-settings">
+          <label class="check"><input type="checkbox" name="diarize" id="diarize" disabled> Разделять по говорящим</label>
+          <p id="speaker-model-status" class="muted" role="status">Проверяю готовность модели…</p>
+          <label id="speaker-count-option" class="speaker-count" hidden>Количество говорящих <input type="number" name="num_speakers" min="1" max="20" placeholder="Автоматически" disabled></label>
+          <details class="speaker-setup"><summary>Настройка говорящих</summary>
+            <p class="muted">Один раз запустите <strong>setup-speakers.cmd</strong>. Затем примите условия <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener noreferrer">модели Community-1</a> и создайте <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer">токен Hugging Face</a> с правом чтения модели.</p>
+            <div id="model-access-controls" class="model-access"><label for="hf-model-token">Токен для первого скачивания</label><input id="hf-model-token" type="password" autocomplete="off" placeholder="hf_…"><button id="prepare-speakers" type="button" class="button secondary">Скачать модель</button></div>
+            <p class="muted">Токен передаётся Hugging Face для скачивания и не сохраняется. Затем диаризация работает без интернета на CPU. Имена задаются отдельно для каждой записи.</p>
+          </details>
         </div>
         <div class="actions">
           <label class="check" id="offline-option"><input type="checkbox" name="offline" checked> Без интернета <span title="Использовать только уже скачанную модель. Small уже установлена.">ⓘ</span></label>
@@ -53,20 +77,34 @@
       <p class="queue-note">Можно добавить ещё файлы во время обработки. Очередь сохранится при обновлении вкладки, пока работает сервер.</p>
     </section>
     <section class="card history-card" aria-labelledby="history-title">
-      <div class="queue-head"><div><p class="eyebrow">СОХРАНЕНО ЛОКАЛЬНО</p><h2 id="history-title">История результатов <span id="history-count" class="count">0</span></h2><p id="history-summary" class="muted">Готовые TXT и MP3 сохраняются здесь после перезапуска.</p></div></div>
+      <div class="queue-head"><div><p class="eyebrow">СОХРАНЕНО ЛОКАЛЬНО</p><h2 id="history-title">История результатов <span id="history-count" class="count">0</span></h2><p id="history-summary" class="muted">Готовые файлы сохраняются здесь после перезапуска.</p></div></div>
       <div class="history-filters">
         <input id="history-search" type="search" placeholder="Найти по имени файла" aria-label="Поиск в истории">
-        <select id="history-type" aria-label="Тип результата"><option value="all">Все результаты</option><option value="transcribe">Стенограммы TXT</option><option value="convert">Аудиодорожки MP3</option></select>
+        <select id="history-type" aria-label="Тип результата"><option value="all">Все результаты</option><option value="text">Стенограммы TXT</option><option value="audio">Аудио</option><option value="video">Видео</option></select>
       </div>
       <p id="history-status" class="connection" role="status" hidden></p>
       <div id="history-list" class="queue-list" aria-label="Сохранённые результаты"></div>
       <p id="history-empty" class="queue-note">История пока пуста. Добавьте файлы в очередь — готовые результаты сохранятся автоматически.</p>
-      <p class="queue-note">Исходные записи в истории не хранятся. Результаты останутся до тех пор, пока вы их не удалите.</p>
+      <p class="queue-note">Аудио для прослушивания сохраняется только по вашей галочке. При удалении результата удаляется и его аудиокопия.</p>
     </section>
     <section id="result" class="card result" hidden>
       <div class="result-head"><div><p class="eyebrow">ГОТОВО</p><h2 id="result-title">Ваша стенограмма</h2><p id="result-info" class="muted"></p></div><div class="queue-actions"><a id="download" class="button" download>Скачать .txt ↓</a><button id="close-result" class="quiet-button" type="button">Закрыть</button></div></div>
+      <section id="speaker-names" class="speaker-names" hidden aria-label="Таблица соответствий говорящих">
+        <h3>Кто говорит</h3><p class="muted">Имена необязательны и относятся только к этой записи. Они сохранятся в истории и скачиваемом TXT.</p>
+        <table><thead><tr><th scope="col">Говорящий</th><th scope="col">Имя</th></tr></thead><tbody id="speaker-name-rows"></tbody></table>
+        <button id="save-speaker-names" type="button" class="button secondary">Сохранить имена</button><p id="speaker-name-status" class="muted" role="status"></p>
+      </section>
       <textarea id="transcript" aria-label="Текст стенограммы" readonly spellcheck="false"></textarea>
+      <section id="listening" class="listening" hidden aria-label="Прослушивание стенограммы">
+        <p class="muted">Нажмите на реплику — запись начнётся с этого места.</p>
+        <audio id="transcript-audio" controls preload="metadata" aria-label="Аудио стенограммы"></audio>
+        <p id="listening-status" class="muted" role="status"></p>
+        <ol id="transcript-segments" class="transcript-segments" aria-label="Реплики стенограммы"></ol>
+      </section>
+      <p id="listening-unavailable" class="muted" hidden>Аудио для этой стенограммы не сохранено. Для новых записей включите «Сохранить аудио для прослушивания реплик» перед обработкой.</p>
       <audio id="audio-preview" controls preload="metadata" hidden aria-label="Извлечённая аудиодорожка"></audio>
+      <video id="video-preview" controls preload="metadata" hidden aria-label="Сконвертированное видео"></video>
+      <p id="playback-hint" class="muted" hidden>Если браузер не воспроизводит этот формат, скачайте файл и откройте его в плеере.</p>
     </section>
     <footer><span>Ваши записи остаются на этом компьютере.</span><span>Whisper / FastAPI</span></footer>
   </main>

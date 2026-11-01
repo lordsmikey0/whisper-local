@@ -1,0 +1,10 @@
+pyannote.audio==4.0.1
+pyannote-core==6.0.1
+pyannote-database==6.0.0
+pyannote-metrics==4.0.0
+pyannote-pipeline==4.0.0
+torch==2.8.0
+torchaudio==2.8.0
+torchcodec==0.7.0
+av==15.1.0
+huggingface-hub==0.35.3

@@ -2,6 +2,7 @@
 
 import argparse
 import gc
+import json
 import os
 from pathlib import Path
 import sys
@@ -62,6 +63,7 @@ def transcribe(model, args, output):
     segments, info = model.transcribe(
         str(args.audio), language=None if args.language == "auto" else args.language,
         task="transcribe", beam_size=5, vad_filter=True,
+        word_timestamps=bool(getattr(args, 'diarize', False)),
     )
     print(f"Язык: {info.language}. Обработка записи…", flush=True)
     duration = getattr(info, "duration", None)
@@ -69,6 +71,8 @@ def transcribe(model, args, output):
     # Keep an existing transcript intact if decoding/inference fails halfway through.
     temp_path = None
     count = 0
+    units = []
+    playback_segments = []
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8-sig", newline="\n",
                                          dir=output.parent, suffix=".partial", delete=False) as f:
@@ -78,6 +82,14 @@ def transcribe(model, args, output):
                 if text:
                     f.write(text + "\n")
                     count += 1
+                    if getattr(args, 'keep_audio', False):
+                        playback_segments.append({'start': float(segment.start), 'end': float(segment.end), 'text': text})
+                    if getattr(args, 'diarize', False):
+                        words = getattr(segment, 'words', None)
+                        if words:
+                            units.extend({'start': float(w.start), 'end': float(w.end), 'text': w.word} for w in words)
+                        else:
+                            units.append({'start': float(segment.start), 'end': float(segment.end), 'text': ' ' + text})
                 print(f"\rОбработано до {segment.end:.0f} сек.", end="", flush=True)
                 report(args, "Распознавание", processed=segment.end, total=duration,
                        progress=min(99, segment.end / duration * 100) if duration else None)
@@ -93,6 +105,10 @@ def transcribe(model, args, output):
             temp_path.unlink()
         if not count:
             print("Речь не обнаружена: создан пустой TXT.")
+        if getattr(args, 'diarize', False):
+            output.with_suffix('.words.json').write_text(json.dumps(units, ensure_ascii=False), encoding='utf-8')
+        if getattr(args, 'keep_audio', False):
+            output.with_suffix('.segments.json').write_text(json.dumps(playback_segments, ensure_ascii=False), encoding='utf-8')
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)

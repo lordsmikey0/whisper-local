@@ -1,9 +1,14 @@
 const form = document.querySelector('#form');
+let listeningSegments = [];
 const fileInput = document.querySelector('#file');
 const controls = document.querySelector('#controls');
 const zone = document.querySelector('#drop-zone');
 const result = document.querySelector('#result');
 const preview = document.querySelector('#audio-preview');
+const videoPreview = document.querySelector('#video-preview');
+const videoFormats = new Set(['mp4', 'mkv', 'mov', 'webm']);
+function formatOf(item) { return item.output_format || item.options?.output_format || (item.mode === 'convert' ? 'mp3' : 'txt'); }
+function kindOf(item) { return item.mode === 'transcribe' ? 'text' : videoFormats.has(formatOf(item)) ? 'video' : 'audio'; }
 const selectedList = document.querySelector('#selected-files');
 const queueList = document.querySelector('#queue-list');
 const terminal = new Set(['done', 'error', 'cancelled']);
@@ -17,6 +22,8 @@ let viewingSource = null;
 let historyItems = [];
 let historyFetchedAt = 0;
 let completionSignature = '';
+let speakerState = {ready:false, libraries_ready:false, model_ready:false, preparing:false};
+let currentSpeakers = [];
 const historyViews = new Map();
 const confirmingDelete = new Set();
 const deletingHistory = new Set();
@@ -59,7 +66,7 @@ function renderSelected() {
   });
   const converting = form.elements.mode.value === 'convert';
   document.querySelector('#file-title').textContent = selected.length ? `Выбрано файлов: ${selected.length}`
-    : converting ? 'Перетащите MP4 сюда' : 'Перетащите аудио или MP4 сюда';
+    : 'Перетащите аудио или видео сюда';
   document.querySelector('#file-info').textContent = selected.length
     ? `${(selected.reduce((sum, file) => sum + file.size, 0) / 1024 / 1024).toLocaleString('ru-RU', {maximumFractionDigits: 1})} МБ · можно добавить ещё`
     : 'Можно сразу несколько · нажмите, чтобы выбрать';
@@ -74,10 +81,29 @@ for (const input of form.querySelectorAll('[name="mode"]')) input.addEventListen
   const converting = form.elements.mode.value === 'convert';
   document.querySelector('#settings').hidden = converting;
   document.querySelector('#offline-option').hidden = converting;
-  document.querySelector('#convert-hint').hidden = !converting;
-  fileInput.accept = converting ? 'video/mp4,.mp4' : 'audio/*,video/mp4,.mp3,.wav,.m4a,.flac,.ogg,.opus,.aac,.wma,.mp4,.webm';
+  document.querySelector('#convert-settings').hidden = !converting;
+  document.querySelector('#speaker-settings').hidden = converting;
+  document.querySelector('#listening-option').hidden = converting;
+  form.elements.keep_audio.disabled = converting;
+  updateSpeakerControls();
+  updateConversionSettings();
   renderSelected();
 });
+function updateConversionSettings() {
+  const converting = form.elements.mode.value === 'convert';
+  const format = form.elements.output_format.value;
+  const video = videoFormats.has(format);
+  const lossless = format === 'wav' || format === 'flac';
+  for (const field of document.querySelectorAll('#convert-settings input, #convert-settings select')) field.disabled = !converting;
+  for (const field of document.querySelectorAll('#video-options input, #video-options select')) field.disabled = !converting || !video;
+  form.elements.quality.disabled = !converting || lossless;
+  document.querySelector('#video-options').hidden = !video;
+  document.querySelector('#quality-option').hidden = lossless;
+  document.querySelector('#convert-hint').textContent = video
+    ? (format === 'webm' ? 'Видео VP9. WebM может обрабатываться дольше других форматов.' : 'Видео H.264 с аудиодорожкой AAC. Совместимые параметры уже подобраны.')
+    : lossless ? 'Формат без потерь: частота и каналы исходного аудио сохраняются.' : 'Аудио из записи или видео. Модель Whisper не нужна.';
+}
+form.elements.output_format.addEventListener('change', updateConversionSettings);
 for (const event of ['dragenter', 'dragover']) zone.addEventListener(event, e => {
   e.preventDefault();
   if (!uploading) zone.classList.add('dragover');
@@ -106,7 +132,7 @@ function renderQueue() {
     if (!view) {
       const row = element('article', 'job');
       const top = element('div', 'job-top');
-      const icon = element('span', 'file-icon', job.mode === 'convert' ? 'MP3' : 'TXT');
+      const icon = element('span', 'file-icon', formatOf(job).toUpperCase());
       const description = element('div', 'job-description');
       const name = element('h3', 'job-name', job.filename);
       const detail = element('p', 'job-detail');
@@ -221,15 +247,42 @@ function upload(job, file, options) {
 form.addEventListener('submit', async e => {
   e.preventDefault();
   if (!selected.length || uploading) return;
-  const mode = form.elements.mode.value;
-  if (mode === 'convert' && selected.some(file => !/\.mp4$/i.test(file.name))) {
-    showStatus('В режиме MP4 → MP3 выбирайте только видео MP4.');
+  if (!form.checkValidity()) {
+    const invalid = form.querySelector(':invalid');
+    const details = invalid?.closest('details');
+    if (details) details.open = true;
+    form.reportValidity();
     return;
   }
+  const mode = form.elements.mode.value;
   const options = {mode, model: form.elements.model.value, language: form.elements.language.value,
     device: form.elements.device.value, offline: form.elements.offline.checked};
+  if (mode === 'transcribe') {
+    options.diarize = form.elements.diarize.checked;
+    options.keep_audio = form.elements.keep_audio.checked;
+    if (options.diarize && form.elements.num_speakers.value !== '') options.num_speakers = Number(form.elements.num_speakers.value);
+  }
+  if (mode === 'convert') {
+    options.output_format = form.elements.output_format.value;
+    options.quality = form.elements.quality.value;
+    options.trim_start = Number(form.elements.trim_start.value || 0);
+    const end = form.elements.trim_end.value;
+    if (end !== '') options.trim_end = Number(end);
+    if (options.trim_end != null && options.trim_end <= options.trim_start) {
+      document.querySelector('.advanced-settings').open = true;
+      showStatus('Конец отрезка должен быть позже начала.'); return;
+    }
+    if (videoFormats.has(options.output_format)) {
+      if (selected.some(file => /\.(mp3|wav|flac|m4a|aac|ogg|opus|wma)$/i.test(file.name))) {
+        showStatus('Для сохранения видео нужны видеофайлы. Для аудиозаписей выберите аудиоформат.'); return;
+      }
+      options.resolution = form.elements.resolution.value;
+      options.fps = form.elements.fps.value;
+      options.mute = form.elements.mute.checked;
+    }
+  }
   const batch = selected.map(file => {
-    const job = {id: crypto.randomUUID().replaceAll('-', ''), filename: file.name, mode, state: 'queued', stage: 'Ожидает передачи', elapsed: 0};
+    const job = {id: crypto.randomUUID().replaceAll('-', ''), filename: file.name, mode, output_format: mode === 'convert' ? options.output_format : 'txt', state: 'queued', stage: 'Ожидает передачи', elapsed: 0};
     localJobs.set(job.id, job);
     return {job, file};
   });
@@ -278,15 +331,29 @@ async function refresh() {
 }
 async function poll() {
   await refresh();
+  await refreshSpeakerStatus();
   setTimeout(poll, jobs().some(job => !terminal.has(job.state)) ? 650 : 2000);
 }
 function closeResult() {
+  const audio = document.querySelector('#transcript-audio');
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  document.querySelector('#listening').hidden = true;
+  document.querySelector('#listening-unavailable').hidden = true;
+  document.querySelector('#transcript-segments').replaceChildren();
+  listeningSegments = [];
   viewingId = null;
   viewingSource = null;
   preview.pause();
   preview.removeAttribute('src');
   preview.load();
+  videoPreview.pause();
+  videoPreview.removeAttribute('src');
+  videoPreview.load();
   result.hidden = true;
+  currentSpeakers = [];
+  document.querySelector('#speaker-names').hidden = true;
 }
 document.querySelector('#close-result').onclick = closeResult;
 async function openResult(job, source = 'queue') {
@@ -295,25 +362,31 @@ async function openResult(job, source = 'queue') {
   viewingSource = source;
   const base = source === 'history' ? '/api/history' : '/api/jobs';
   const converting = job.mode === 'convert';
+  const isVideo = kindOf(job) === 'video';
   const transcript = document.querySelector('#transcript');
   if (!converting) {
     const body = await api(`${base}/${job.id}/result`);
     if (viewingId !== job.id) return;
     transcript.value = body.text;
+    renderSpeakerNames(body);
+    renderListening(body, job.id);
   } else {
-    preview.src = `${base}/${job.id}/download`;
+    (isVideo ? videoPreview : preview).src = `${base}/${job.id}/download`;
   }
-  transcript.hidden = converting;
-  preview.hidden = !converting;
-  document.querySelector('#result-title').textContent = converting ? 'Ваша аудиодорожка' : 'Ваша стенограмма';
+  transcript.hidden = converting || !document.querySelector('#listening').hidden;
+  preview.hidden = !converting || isVideo;
+  videoPreview.hidden = !isVideo;
+  document.querySelector('#playback-hint').hidden = !converting;
+  document.querySelector('#result-title').textContent = converting ? (isVideo ? 'Ваше видео' : 'Ваше аудио') : 'Ваша стенограмма';
   document.querySelector('#result-info').textContent = job.output_name;
   const download = document.querySelector('#download');
   download.href = `${base}/${job.id}/download`;
   download.download = job.output_name;
-  download.textContent = converting ? 'Скачать .mp3 ↓' : 'Скачать .txt ↓';
+  download.textContent = `Скачать .${formatOf(job)} ↓`;
   result.hidden = false;
   result.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
+updateConversionSettings();
 renderSelected();
 poll();
 
@@ -331,7 +404,7 @@ function historyMessage(message) {
 function renderHistory() {
   const query = document.querySelector('#history-search').value.trim().toLocaleLowerCase('ru-RU');
   const mode = document.querySelector('#history-type').value;
-  const filtered = historyItems.filter(item => (mode === 'all' || mode === item.mode)
+  const filtered = historyItems.filter(item => (mode === 'all' || mode === kindOf(item))
     && `${item.filename} ${item.output_name}`.toLocaleLowerCase('ru-RU').includes(query));
   const ids = new Set(filtered.map(item => item.id));
   for (const [id, view] of historyViews) if (!ids.has(id)) { view.row.remove(); historyViews.delete(id); }
@@ -341,7 +414,7 @@ function renderHistory() {
     if (!view) {
       const row = element('article', 'job');
       const top = element('div', 'job-top');
-      const icon = element('span', 'file-icon', item.mode === 'convert' ? 'MP3' : 'TXT');
+      const icon = element('span', 'file-icon', formatOf(item).toUpperCase());
       const description = element('div', 'job-description');
       const title = element('h3', 'job-name history-headline', item.output_name);
       const detail = element('p', 'job-detail');
@@ -377,14 +450,14 @@ function renderHistory() {
     view.open.disabled = !item.available;
     view.download.hidden = !item.available;
     view.row.classList.toggle('history-missing', !item.available);
-    view.detail.textContent = [new Date(item.created_at).toLocaleString('ru-RU'), sizeLabel(item.size),
+    view.detail.textContent = [new Date(item.created_at).toLocaleString('ru-RU'), sizeLabel(item.size + (item.audio_size || 0)),
       item.available ? `Исходник: ${item.filename}` : 'Файл не найден на диске'].join(' · ');
     view.confirmation.hidden = !confirmingDelete.has(item.id);
     view.confirm.disabled = view.keep.disabled = view.remove.disabled = deletingHistory.has(item.id);
     view.confirm.textContent = deletingHistory.has(item.id) ? 'Удаляю…' : 'Да, удалить';
   });
   document.querySelector('#history-count').textContent = historyItems.length;
-  document.querySelector('#history-summary').textContent = `${historyItems.length} сохранено · ${sizeLabel(historyItems.reduce((sum, item) => sum + item.size, 0))} · доступны после перезапуска`;
+  document.querySelector('#history-summary').textContent = `${historyItems.length} сохранено · ${sizeLabel(historyItems.reduce((sum, item) => sum + item.size + (item.audio_size || 0), 0))} · доступны после перезапуска`;
   const empty = document.querySelector('#history-empty');
   empty.hidden = !!filtered.length;
   empty.textContent = historyItems.length ? 'По вашему запросу ничего не найдено.'
@@ -415,3 +488,135 @@ async function deleteHistory(id) {
 }
 document.querySelector('#history-search').addEventListener('input', renderHistory);
 document.querySelector('#history-type').addEventListener('change', renderHistory);
+
+function renderListening(body, id) {
+  const panel = document.querySelector('#listening');
+  const audio = document.querySelector('#transcript-audio');
+  const list = document.querySelector('#transcript-segments');
+  const enabled = !!body.audio_available;
+  panel.hidden = !enabled;
+  document.querySelector('#listening-unavailable').hidden = enabled;
+  document.querySelector('#transcript').hidden = enabled;
+  if (!enabled) return;
+  // Keep playback position intact when speaker names are changed.
+  if (audio.dataset.record !== id || !audio.getAttribute('src')) {
+    audio.dataset.record = id;
+    audio.src = `/api/history/${id}/audio`;
+  }
+  listeningSegments = body.segments || [];
+  list.replaceChildren();
+  document.querySelector('#listening-status').textContent = listeningSegments.length ? '' : 'Речь в записи не обнаружена.';
+  const labels = new Map((body.speakers || []).map(speaker => [speaker.id, body.names?.[speaker.id] || speaker.label]));
+  for (const segment of listeningSegments) {
+    const row = element('li');
+    const button = element('button', 'segment-button');
+    button.type = 'button';
+    button.append(element('span', 'segment-time', `▶ ${timeLabel(segment.start)}`));
+    const content = element('span', 'segment-content');
+    if (labels.has(segment.speaker)) content.append(element('strong', 'segment-speaker', labels.get(segment.speaker)));
+    content.append(element('span', '', segment.text));
+    button.append(content);
+    button.onclick = () => {
+      document.querySelector('#listening-status').textContent = '';
+      audio.currentTime = Number.isFinite(audio.duration) ? Math.min(segment.start, Math.max(0, audio.duration - .05)) : segment.start;
+      audio.play().catch(() => {
+        if (viewingId === id) document.querySelector('#listening-status').textContent = 'Не удалось начать воспроизведение. Нажмите ▶ в плеере или повторите выбор реплики.';
+      });
+    };
+    row.append(button); list.append(row);
+  }
+  highlightSegment();
+}
+function highlightSegment() {
+  const audio = document.querySelector('#transcript-audio');
+  const time = audio.currentTime;
+  let active = -1;
+  for (let i = 0; i < listeningSegments.length; i++) {
+    if (time >= listeningSegments[i].start && time < listeningSegments[i].end) active = i;
+  }
+  document.querySelectorAll('#transcript-segments button').forEach((button, i) => {
+    if (i === active) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+  });
+}
+document.querySelector('#transcript-audio').addEventListener('timeupdate', highlightSegment);
+document.querySelector('#transcript-audio').addEventListener('error', () => {
+  if (viewingId && !document.querySelector('#listening').hidden) document.querySelector('#listening-status').textContent = 'Не удалось загрузить аудио. Проверьте связь с сервером и наличие файла в истории.';
+});
+
+function updateSpeakerControls() {
+  const active = form.elements.mode.value === 'transcribe';
+  const checkbox = form.elements.diarize;
+  checkbox.disabled = !active || !speakerState.ready;
+  if (!speakerState.ready) checkbox.checked = false;
+  const count = document.querySelector('#speaker-count-option');
+  count.hidden = !checkbox.checked || !active;
+  form.elements.num_speakers.disabled = count.hidden;
+}
+form.elements.diarize.addEventListener('change', updateSpeakerControls);
+async function refreshSpeakerStatus() {
+  try {
+    speakerState = await api('/api/diarization/status');
+    updateSpeakerControls();
+    const status = document.querySelector('#speaker-model-status');
+    status.textContent = speakerState.error || (speakerState.preparing ? 'Скачиваю и проверяю модель… Это может занять несколько минут.'
+      : speakerState.ready ? 'Готово · разделение по говорящим на CPU, локально'
+      : !speakerState.libraries_ready ? 'Для первого запуска установите библиотеки: setup-speakers.cmd'
+      : 'Библиотеки готовы. Скачайте модель в настройке ниже.');
+    document.querySelector('#prepare-speakers').disabled = speakerState.preparing || !speakerState.libraries_ready;
+    document.querySelector('#model-access-controls').hidden = speakerState.ready;
+  } catch { document.querySelector('#speaker-model-status').textContent = 'Не удалось проверить модель. Проверьте соединение с сервером.'; }
+}
+document.querySelector('#prepare-speakers').onclick = async () => {
+  const input = document.querySelector('#hf-model-token');
+  const token = input.value.trim();
+  if (!token) { document.querySelector('#speaker-model-status').textContent = 'Введите токен Hugging Face в поле настройки.'; return; }
+  const button = document.querySelector('#prepare-speakers');
+  button.disabled = true;
+  try {
+    await api('/api/diarization/prepare', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token})});
+    input.value = '';
+    await refreshSpeakerStatus();
+  } catch (error) { document.querySelector('#speaker-model-status').textContent = error.message; }
+  finally { input.value = ''; button.disabled = speakerState.preparing || !speakerState.libraries_ready; }
+};
+function renderSpeakerNames(body) {
+  currentSpeakers = body.speakers || [];
+  const panel = document.querySelector('#speaker-names');
+  panel.hidden = !currentSpeakers.length;
+  const rows = document.querySelector('#speaker-name-rows');
+  rows.replaceChildren();
+  document.querySelector('#speaker-name-status').textContent = '';
+  for (const speaker of currentSpeakers) {
+    const row = element('tr');
+    row.append(element('td','',speaker.label));
+    const cell = element('td');
+    const input = element('input');
+    input.type = 'text'; input.maxLength = 80;
+    input.dataset.speaker = speaker.id;
+    input.value = body.names?.[speaker.id] || '';
+    input.placeholder = speaker.label;
+    input.setAttribute('aria-label', `Имя для ${speaker.label}`);
+    cell.append(input); row.append(cell); rows.append(row);
+  }
+}
+document.querySelector('#save-speaker-names').onclick = async () => {
+  if (!viewingId) return;
+  const id = viewingId;
+  const names = {};
+  for (const input of document.querySelectorAll('#speaker-name-rows input')) names[input.dataset.speaker] = input.value.trim();
+  const button = document.querySelector('#save-speaker-names');
+  button.disabled = true;
+  try {
+    const body = await api(`/api/history/${id}/speakers`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({names})});
+    if (viewingId !== id) return;
+    document.querySelector('#transcript').value = body.text;
+    renderListening(body, id);
+    document.querySelector('#speaker-name-status').textContent = 'Имена сохранены. Скачиваемый TXT и ZIP используют эти имена.';
+    // Force a fresh download URL even if the browser cached an older TXT.
+    const download = document.querySelector('#download');
+    download.href = `/api/history/${id}/download?v=${Date.now()}`;
+    await refreshHistory();
+  } catch (error) { if (viewingId === id) document.querySelector('#speaker-name-status').textContent = error.message; }
+  finally { button.disabled = false; }
+};

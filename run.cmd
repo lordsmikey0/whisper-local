@@ -1,6 +1,8 @@
 @echo off
 setlocal
 set "PYTHONUTF8=1"
+rem Scope GPU selection to this utility; do not inherit an invalid GPU index.
+set "CUDA_VISIBLE_DEVICES=0"
 if not exist "%~dp0.venv\Scripts\python.exe" (
   echo Please run setup.cmd first.
   pause
