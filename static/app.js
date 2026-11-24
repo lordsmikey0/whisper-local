@@ -560,7 +560,7 @@ async function refreshSpeakerStatus() {
     updateSpeakerControls();
     const status = document.querySelector('#speaker-model-status');
     status.textContent = speakerState.error || (speakerState.preparing ? (speakerState.stage || 'Запускаю проверку доступа и подготовку модели…')
-      : speakerState.ready ? 'Готово · разделение по говорящим на CPU, локально'
+      : speakerState.ready ? 'Готово · GPU при наличии CUDA · до 4 ГБ VRAM / 4 ГБ RAM'
       : !speakerState.libraries_ready ? 'Для первого запуска установите библиотеки: setup-speakers.cmd'
       : 'Библиотеки готовы. Скачайте модель в настройке ниже.');
     document.querySelector('#prepare-speakers').disabled = speakerState.preparing || !speakerState.libraries_ready;

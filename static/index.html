@@ -58,7 +58,7 @@
           <details class="speaker-setup"><summary>Настройка говорящих</summary>
             <p class="muted">Один раз запустите <strong>setup-speakers.cmd</strong>. Затем примите условия <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener noreferrer">модели Community-1</a> и создайте <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer">токен Hugging Face</a> с правом чтения модели.</p>
             <div id="model-access-controls" class="model-access"><label for="hf-model-token">Токен для первого скачивания</label><input id="hf-model-token" type="password" autocomplete="off" placeholder="hf_…"><button id="prepare-speakers" type="button" class="button secondary">Скачать модель</button></div>
-            <p class="muted">Токен передаётся Hugging Face для скачивания и не сохраняется. Затем диаризация работает без интернета на CPU. Имена задаются отдельно для каждой записи.</p>
+            <p class="muted">Токен передаётся Hugging Face для скачивания и не сохраняется. Затем обработка работает локально, с автовыбором GPU. Бюджет говорящих: до 4 ГБ VRAM и 4 ГБ RAM. Имена задаются отдельно для каждой записи.</p>
           </details>
         </div>
         <div class="actions">

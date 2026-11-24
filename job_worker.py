@@ -3,6 +3,8 @@ import argparse
 import json
 from pathlib import Path
 import time
+import subprocess
+import sys
 from types import SimpleNamespace
 
 
@@ -27,6 +29,20 @@ class ProgressWriter:
             pass
 
 
+def recognize(args, progress):
+    import transcribe
+    def asr_progress(**values):
+        if args.diarize and values.get('progress') is not None:
+            values['progress'] *= .65
+        elif args.keep_audio and values.get('progress') is not None:
+            values['progress'] *= .9
+        progress(**values)
+    transcribe.run(SimpleNamespace(audio=args.source, output=args.output, model=args.model,
+                                  language=args.language, device=args.device, offline=args.offline,
+                                  overwrite=False, download_only=False, progress_callback=asr_progress,
+                                  diarize=args.diarize, keep_audio=args.keep_audio))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
@@ -47,6 +63,7 @@ def main():
     parser.add_argument('--diarize', action='store_true')
     parser.add_argument('--keep-audio', action='store_true')
     parser.add_argument('--num-speakers', type=int)
+    parser.add_argument('--asr-only', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     progress = ProgressWriter(args.progress)
     try:
@@ -58,27 +75,28 @@ def main():
             if args.diarize:
                 from diarization import require_ready
                 require_ready()
-            import transcribe
-            def asr_progress(**values):
-                if args.diarize and values.get('progress') is not None:
-                    values['progress'] *= .65
-                elif args.keep_audio and values.get('progress') is not None:
-                    values['progress'] *= .9
-                progress(**values)
-            transcribe.run(SimpleNamespace(audio=args.source, output=args.output, model=args.model,
-                                          language=args.language, device=args.device, offline=args.offline,
-                                          overwrite=False, download_only=False, progress_callback=asr_progress,
-                                          diarize=args.diarize, keep_audio=args.keep_audio))
+            if args.asr_only:
+                recognize(args, progress)
+                return 0
+            if args.diarize:
+                # Terminating the ASR child releases its CUDA context and allocator
+                # before pyannote starts, including CTranslate2's cached VRAM.
+                command = [sys.executable, '-X', 'utf8', '-u', str(Path(__file__).resolve()), *sys.argv[1:], '--asr-only']
+                flags = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+                if subprocess.run(command, stdout=sys.stdout, stderr=sys.stderr, **flags).returncode:
+                    raise RuntimeError('Не удалось распознать запись. Подробности выше в журнале задачи.')
+            else:
+                recognize(args, progress)
             if args.diarize:
                 from diarization import run_diarization
                 from speaker_text import align_words, render_transcript, validate_data
                 units = json.loads(args.output.with_suffix('.words.json').read_text(encoding='utf-8'))
                 if units:
-                    progress(stage='Загрузка модели говорящих · CPU', progress=65, processed=0, total=None, device='cpu')
-                    turns = run_diarization(args.source, args.output.with_suffix('.turns.json'), args.progress, args.num_speakers)
+                    progress(stage='Загрузка модели говорящих · выбор устройства', progress=65, processed=0, total=None)
+                    turns = run_diarization(args.source, args.output.with_suffix('.turns.json'), args.progress, args.num_speakers, device=args.device)
                 else:
                     turns = []
-                progress(stage='Разметка реплик', progress=98, device='cpu')
+                progress(stage='Разметка реплик', progress=98)
                 data = validate_data(align_words(units, turns))
                 args.output.with_suffix('.speakers.json').write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
                 temporary = args.output.with_suffix('.named.partial')

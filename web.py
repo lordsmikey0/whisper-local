@@ -23,6 +23,7 @@ from jobqueue import TaskQueue
 from history import HistoryStore
 from media_formats import FORMATS, result_mime
 from diarization import ModelPreparation
+from server_identity import INSTANCE_ID
 
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / ".web-tmp"
@@ -67,7 +68,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "busy": BUSY.locked()}
+    return {"status": "ok", "busy": BUSY.locked(), 'app': 'whisper-local', 'instance_id': INSTANCE_ID}
 
 
 @app.get("/api/formats")

@@ -34,23 +34,39 @@ def require_ready(root=ROOT):
         raise ValueError('Сначала скачайте модель в блоке «Настройка говорящих».')
 
 
-def run_diarization(source, output, progress_file, num_speakers=None):
+def run_diarization(source, output, progress_file, num_speakers=None, device='auto'):
     require_ready()
     env = os.environ.copy()
-    env.update({'HF_HUB_OFFLINE': '1', 'PYANNOTE_METRICS_ENABLED': '0', 'CUDA_VISIBLE_DEVICES': '-1', 'PYTHONUTF8': '1'})
+    env.update({'HF_HUB_OFFLINE': '1', 'PYANNOTE_METRICS_ENABLED': '0', 'CUDA_VISIBLE_DEVICES': '0', 'PYTHONUTF8': '1'})
     # Credentials are neither needed nor forwarded during offline inference.
     env.pop('HF_TOKEN', None)
     env.pop('HUGGING_FACE_HUB_TOKEN', None)
     command = [str(runtime_python()), '-X', 'utf8', str(ROOT / 'diarize_worker.py'),
                '--source', str(source), '--output', str(output), '--model-dir', str(model_path()),
-               '--progress', str(progress_file)]
+               '--progress', str(progress_file), '--vram-gib', '4', '--ram-gib', '4']
     if num_speakers:
         command += ['--num-speakers', str(num_speakers)]
     flags = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
-    result = subprocess.run(command, env=env, capture_output=True, encoding='utf-8', errors='replace', **flags)
+    batch = 16
+    selected = device
+    while True:
+        result = subprocess.run(command + ['--device', selected, '--batch-size', str(batch)],
+                                env=env, capture_output=True, encoding='utf-8', errors='replace', **flags)
+        if result.stdout:
+            print(result.stdout, flush=True)
+        if result.returncode != 20:
+            break
+        if batch > 1:
+            batch //= 2
+            print(f'Не хватает VRAM. Повтор с пакетом {batch}.', flush=True)
+        elif device == 'auto' and selected != 'cpu':
+            selected = 'cpu'
+            print('Даже минимальный пакет не помещается в GPU. Повтор на CPU в пределах RAM 4 ГиБ.', flush=True)
+        else:
+            break
     if result.returncode:
         detail = (result.stdout + '\n' + result.stderr).strip()[-2000:]
-        raise RuntimeError('Не удалось разделить говорящих. ' + detail)
+        raise RuntimeError(f'Не удалось разделить говорящих (код {result.returncode}). ' + detail)
     return json.loads(Path(output).read_text(encoding='utf-8'))
 
 

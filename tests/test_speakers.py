@@ -128,7 +128,7 @@ class SpeakerTests(unittest.TestCase):
         output.write_text('[]',encoding='utf-8')
         def run(command, **kwargs):
             self.assertEqual(kwargs['env']['HF_HUB_OFFLINE'],'1')
-            self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'],'-1')
+            self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'],'0')
             self.assertNotIn('HF_TOKEN',kwargs['env'])
             return SimpleNamespace(returncode=0,stdout='',stderr='')
         with patch('diarization.require_ready'), patch.dict('os.environ', {'HF_TOKEN':'not-real'}), \

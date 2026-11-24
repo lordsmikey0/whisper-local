@@ -5,6 +5,8 @@ import os
 import warnings
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from speaker_errors import preparation_error
 
@@ -18,6 +20,49 @@ os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '120')
 warnings.filterwarnings('ignore', message=r'\s*torchcodec is not installed correctly.*', category=UserWarning)
 
 
+@contextmanager
+def audio_waveform(source, work):
+    """Decode onto a disk-backed array, avoiding two full copies in RAM."""
+    import av
+    import numpy as np
+    import torch
+    with tempfile.TemporaryDirectory(prefix='speaker-audio-', dir=work) as folder:
+        path = Path(folder) / 'mono.f32'
+        samples = 0
+        with path.open('wb') as target, av.open(str(source), options={'protocol_whitelist': 'file,pipe,crypto,data'}) as audio:
+            if not audio.streams.audio:
+                raise ValueError('В записи нет аудиодорожки.')
+            resampler = av.AudioResampler(format='flt', layout='mono', rate=16000)
+            for frame in audio.decode(audio.streams.audio[0]):
+                for converted in resampler.resample(frame):
+                    data = converted.to_ndarray()
+                    target.write(data.tobytes())
+                    samples += data.size
+            for converted in resampler.resample(None):
+                data = converted.to_ndarray()
+                target.write(data.tobytes())
+                samples += data.size
+        if not samples:
+            raise ValueError('Аудиозапись пустая.')
+        mapped = np.memmap(path, dtype='float32', mode='r+', shape=(1, samples))
+        waveform = torch.from_numpy(mapped)
+        try:
+            yield waveform
+        finally:
+            del waveform
+            mapped._mmap.close()
+
+
+def choose_device(torch, requested):
+    if requested == 'cpu':
+        return 'cpu'
+    if torch.cuda.is_available():
+        return 'cuda'
+    if requested == 'cuda':
+        raise RuntimeError('CUDA для говорящих недоступна. Запустите setup-speakers.cmd -Device cuda.')
+    return 'cpu'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--download', action='store_true')
@@ -28,7 +73,12 @@ def main():
     parser.add_argument('--progress', type=Path)
     parser.add_argument('--num-speakers', type=int)
     parser.add_argument('--status-file', type=Path)
+    parser.add_argument('--device', choices=['auto', 'cuda', 'cpu'], default='auto')
+    parser.add_argument('--batch-size', type=int, choices=[1, 2, 4, 8, 16, 32], default=16)
+    parser.add_argument('--vram-gib', type=float, default=4)
+    parser.add_argument('--ram-gib', type=float, default=4)
     args = parser.parse_args()
+    actual_device = 'cpu'
     stage = 'verify' if args.verify_model else 'download' if args.download else 'inference'
     def status(message, error=''):
         if args.status_file:
@@ -66,6 +116,9 @@ def main():
         if args.verify_model:
             status('Проверка локальной загрузки модели · CPU')
             (args.model_dir / '.ready').unlink(missing_ok=True)
+        else:
+            from speaker_resources import limit_ram
+            limit_ram(args.ram_gib)
         from pyannote.audio import Pipeline
         from pyannote.audio.core.task import Specifications, Problem, Resolution
         import torch
@@ -73,27 +126,25 @@ def main():
         # Keep PyTorch's weights-only loader and scope its allowlist to loading.
         with torch.serialization.safe_globals([Specifications, Problem, Resolution]):
             pipeline = Pipeline.from_pretrained(str(args.model_dir))
-        pipeline.to(torch.device('cpu'))
         if args.verify_model:
+            pipeline.to(torch.device('cpu'))
             (args.model_dir / '.ready').write_text('community-1 verified locally', encoding='utf-8')
             status('Модель готова')
             return 0
-        import av
-        import numpy as np
+        from speaker_resources import configure_gpu, memory_usage
         from job_worker import ProgressWriter
         progress = ProgressWriter(args.progress)
-        progress(stage='Подготовка аудио для говорящих', progress=65, processed=0, total=None, device='cpu')
-        chunks = []
-        with av.open(str(args.source), options={'protocol_whitelist': 'file,pipe,crypto,data'}) as audio:
-            if not audio.streams.audio:
-                raise ValueError('В записи нет аудиодорожки.')
-            resampler = av.AudioResampler(format='flt', layout='mono', rate=16000)
-            for frame in audio.decode(audio.streams.audio[0]):
-                chunks.extend(f.to_ndarray() for f in resampler.resample(frame))
-            chunks.extend(f.to_ndarray() for f in resampler.resample(None))
-        if not chunks:
-            raise ValueError('Аудиозапись пустая.')
-        waveform = torch.from_numpy(np.concatenate(chunks, axis=1))
+        actual_device = choose_device(torch, args.device)
+        if actual_device == 'cuda':
+            gpu_budget = configure_gpu(torch, args.vram_gib)
+            print(f'Говорящие: NVIDIA GPU; бюджет аллокатора {gpu_budget / 1024**3:.2f} ГиБ; RAM {args.ram_gib:g} ГиБ; пакет {args.batch_size}.', flush=True)
+        else:
+            args.batch_size = min(args.batch_size, 4)
+            print('Говорящие: CPU (CUDA недоступна или выбран процессор).', flush=True)
+        pipeline.segmentation_batch_size = args.batch_size
+        pipeline.embedding_batch_size = args.batch_size
+        pipeline.to(torch.device(actual_device))
+        progress(stage='Подготовка аудио для говорящих', progress=65, processed=0, total=None, device=actual_device)
         last_progress = 65
         def hook(step_name, step_artifact=None, file=None, total=None, completed=None):
             nonlocal last_progress
@@ -102,15 +153,30 @@ def main():
             label, base, span = labels.get(step_name, ('Разделение по говорящим', 66, 0))
             fraction = min(1, completed / total) if total and completed is not None else 0
             last_progress = max(last_progress, base + span * fraction)
-            progress(stage=label, progress=last_progress, device='cpu')
+            progress(stage=f'{label} · {"NVIDIA" if actual_device == "cuda" else "CPU"} · пакет {args.batch_size}',
+                     progress=last_progress, device=actual_device)
         kwargs = {'num_speakers': args.num_speakers} if args.num_speakers else {}
-        result = pipeline({'waveform': waveform, 'sample_rate': 16000}, hook=hook, **kwargs)
+        with audio_waveform(args.source, args.output.parent) as waveform, torch.inference_mode():
+            result = pipeline({'waveform': waveform, 'sample_rate': 16000}, hook=hook, **kwargs)
+            del waveform
         annotation = result.exclusive_speaker_diarization
         turns = [{'start': float(turn.start), 'end': float(turn.end), 'speaker': str(speaker)}
                  for turn, _, speaker in annotation.itertracks(yield_label=True)]
         args.output.write_text(json.dumps(turns, ensure_ascii=False), encoding='utf-8')
+        metrics = {**memory_usage(), 'device': actual_device, 'batch_size': args.batch_size,
+                   'vram_peak_bytes': torch.cuda.max_memory_reserved(0) if actual_device == 'cuda' else 0}
+        args.output.with_suffix('.resources.json').write_text(json.dumps(metrics), encoding='utf-8')
+        print('Ресурсы: ' + json.dumps(metrics), flush=True)
         return 0
     except Exception as error:
+        if actual_device == 'cuda' and (type(error).__name__ == 'OutOfMemoryError' or any(
+                text in str(error) for text in ('CUDA out of memory', 'CUDA error: out of memory',
+                                                'CUDNN_STATUS_ALLOC_FAILED', 'CUBLAS_STATUS_ALLOC_FAILED'))):
+            print('Недостаточно видеопамяти для этого пакета. [CUDA_OOM]', flush=True)
+            return 20
+        if isinstance(error, MemoryError):
+            print(f'Недостаточно памяти в пределах лимита RAM {args.ram_gib:g} ГиБ. [RAM_LIMIT]', flush=True)
+            return 21
         if args.download or args.verify_model:
             message = preparation_error(error, stage)
             status('Ошибка подготовки модели', error=message)
