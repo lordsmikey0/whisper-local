@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import tempfile
+from speaker_errors import preparation_error
 
 ROOT = Path(__file__).resolve().parent
 MODEL_ID = 'pyannote/speaker-diarization-community-1'
@@ -60,11 +62,19 @@ class ModelPreparation:
         self.thread = None
         self.error = ''
         self.closing = False
+        self.report_file = None
+
+    def _report(self):
+        try:
+            return json.loads(self.report_file.read_text(encoding='utf-8')) if self.report_file else {}
+        except (OSError, ValueError):
+            return {}
 
     def status(self):
         with self.lock:
             return {**readiness(self.root), 'preparing': bool(self.thread and self.thread.is_alive()),
-                    'error': self.error, 'model_url': 'https://huggingface.co/' + MODEL_ID}
+                    'error': self.error, 'stage': self._report().get('stage', ''),
+                    'model_url': 'https://huggingface.co/' + MODEL_ID}
 
     def start(self, token):
         with self.lock:
@@ -77,6 +87,7 @@ class ModelPreparation:
             if not token or len(token) > 1000 or '\n' in token or '\r' in token:
                 raise ValueError('Введите токен Hugging Face для скачивания модели.')
             self.error = ''
+            self.report_file = None
             self.thread = threading.Thread(target=self._prepare, args=(token,), daemon=True, name='speaker-model-download')
             self.thread.start()
 
@@ -85,9 +96,16 @@ class ModelPreparation:
         env.update({'HF_TOKEN': token, 'PYANNOTE_METRICS_ENABLED': '0', 'PYTHONUTF8': '1',
                     'HF_HUB_DISABLE_TELEMETRY': '1', 'HF_HUB_DISABLE_XET': '1'})
         env.pop('HF_HUB_OFFLINE', None)
+        folder = None
         try:
+            work = self.root / '.web-tmp'
+            work.mkdir(exist_ok=True)
+            folder = tempfile.TemporaryDirectory(prefix='speaker-prepare-', dir=work)
+            with self.lock:
+                self.report_file = Path(folder.name) / 'status.json'
             command = [str(runtime_python(self.root)), '-X', 'utf8', str(self.root / 'diarize_worker.py'),
-                       '--download', '--model-dir', str(model_path(self.root))]
+                       '--download', '--model-dir', str(model_path(self.root)),
+                       '--status-file', str(self.report_file)]
             flags = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
             with self.lock:
                 if self.closing:
@@ -97,14 +115,17 @@ class ModelPreparation:
             code = self.process.wait()
             if code or not readiness(self.root)['model_ready']:
                 with self.lock:
-                    self.error = 'Не удалось подготовить модель. Проверьте интернет, токен и принятые условия доступа к Community-1 на Hugging Face.'
-        except Exception:
+                    self.error = self._report().get('error') or 'Процесс подготовки остановился без отчёта. Проверьте блокировку Python антивирусом и повторите setup-speakers.cmd. [worker/exit]'
+        except Exception as error:
             with self.lock:
-                self.error = 'Не удалось запустить подготовку модели. Повторите установку setup-speakers.cmd.'
+                self.error = preparation_error(error, 'launch')
         finally:
             env.pop('HF_TOKEN', None)
             with self.lock:
                 self.process = None
+                self.report_file = None
+            if folder:
+                folder.cleanup()
 
     def close(self):
         from jobqueue import TaskQueue

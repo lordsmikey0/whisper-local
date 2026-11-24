@@ -559,7 +559,7 @@ async function refreshSpeakerStatus() {
     speakerState = await api('/api/diarization/status');
     updateSpeakerControls();
     const status = document.querySelector('#speaker-model-status');
-    status.textContent = speakerState.error || (speakerState.preparing ? 'Скачиваю и проверяю модель… Это может занять несколько минут.'
+    status.textContent = speakerState.error || (speakerState.preparing ? (speakerState.stage || 'Запускаю проверку доступа и подготовку модели…')
       : speakerState.ready ? 'Готово · разделение по говорящим на CPU, локально'
       : !speakerState.libraries_ready ? 'Для первого запуска установите библиотеки: setup-speakers.cmd'
       : 'Библиотеки готовы. Скачайте модель в настройке ниже.');
